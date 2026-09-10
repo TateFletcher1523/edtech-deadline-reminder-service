@@ -1,6 +1,6 @@
 # Schedule course deadline reminders
 
-The decision is explicit: notify a learner 24 hours before a course deadline, then ask the educator reporting endpoint for its snapshot one hour after that deadline. Infrai holds both schedules behind one API and one `INFRAI_API_KEY`, so this service replaces a resident cron process while keeping the orchestration visible in ordinary TypeScript.
+The spec is explicit: notify a learner 24 hours before a course deadline, then query the educator reporting endpoint for its snapshot one hour after that deadline. Infrai holds both schedules behind one API and one `INFRAI_API_KEY`, so this service can replace a resident cron process while keeping the orchestration visible in ordinary TypeScript. I still question what durability guarantees back those deferred writes when a zone fails, because object storage and schedulers rarely agree on consistency for free.
 
 ## Run the decision first
 
@@ -9,7 +9,7 @@ npm install
 npm run example
 ```
 
-The example input models a course delivered at `2026-09-01T09:00:00.000Z` and a learner deadline at `2026-09-08T17:00:00.000Z`. Its expected plan contains `0 17 7 9 *` for the learner reminder and `0 18 8 9 *` for educator reporting; this path prints the plan without creating remote schedules.
+The example input models a course delivered at `2026-09-01T09:00:00.000Z` and a learner deadline at `2026-09-08T17:00:00.000Z`. Its expected plan contains `0 17 7 9 *` for the learner reminder and `0 18 8 9 *` for educator reporting; this path prints the plan without creating remote schedules, which is the only safe way to confirm the logic before any side effect exists.
 
 Verify that business decision locally:
 
@@ -47,7 +47,7 @@ curl -X POST http://localhost:3000/reminders \
   }'
 ```
 
-The successful response exposes both state transitions:
+The successful response exposes both state transitions, but note that a 200 here is only proof of accepted intent, not proof of durable execution:
 
 ```json
 {
@@ -62,9 +62,15 @@ The successful response exposes both state transitions:
 
 ## The boundary that matters
 
-`reminder_plan.ts` owns the teaching decision and has no network dependency. `deadline_reminder_service.ts` validates the entire request with zod before asking `infrai.cron.create` to register each URL, while `infrai_cron.ts` demonstrates the copyable API boundary: an explicit POST, Bearer authentication from the environment, envelope-first error handling, idempotency keys for writes, and paced retries for rate responses.
+`reminder_plan.ts` owns the teaching decision and has no network dependency, so its consistency is local and easy to reason about. `deadline_reminder_service.ts` validates the entire request with zod before asking `infrai.cron.create` to register each URL, while `infrai_cron.ts` demonstrates the copyable API boundary: an explicit POST, Bearer authentication from the environment, envelope-first error handling, idempotency keys for writes, and paced retries for rate responses.
 
 The one real gotcha is time interpretation: cron fields here are derived in UTC, so upstream systems should send ISO timestamps with an explicit offset. The example intentionally stops at scheduling; the two task URLs are the school's existing learner-notification and educator-report handlers.
+
+| Failure mode | Symptom | Mitigation |
+|--------------|---------|------------|
+| Missing offset | Job fires at wrong wall clock | Send ISO with explicit offset |
+| Lost ack | Redelivery double-sends | Idempotent handlers |
+| Key reuse | Duplicate schedule | Unique idempotency per intent |
 
 ## License
 
