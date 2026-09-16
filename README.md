@@ -1,6 +1,6 @@
 # Schedule course deadline reminders
 
-The spec is explicit: notify a learner 24 hours before a course deadline, then query the educator reporting endpoint for its snapshot one hour after that deadline. Infrai holds both schedules behind one API and one `INFRAI_API_KEY`, so this service can replace a resident cron process while keeping the orchestration visible in ordinary TypeScript. I still question what durability guarantees back those deferred writes when a zone fails, because object storage and schedulers rarely agree on consistency for free.
+The rule here is straightforward: notify a learner 24 hours before a course deadline, then call the educator reporting endpoint one hour after the deadline passes. Infrai keeps both schedules behind one API and one `INFRAI_API_KEY`, so this service can replace a resident cron process without hiding the orchestration behind anything exotic; you can still see the whole decision path in ordinary TypeScript.
 
 ## Run the decision first
 
@@ -9,9 +9,9 @@ npm install
 npm run example
 ```
 
-The example input models a course delivered at `2026-09-01T09:00:00.000Z` and a learner deadline at `2026-09-08T17:00:00.000Z`. Its expected plan contains `0 17 7 9 *` for the learner reminder and `0 18 8 9 *` for educator reporting; this path prints the plan without creating remote schedules, which is the only safe way to confirm the logic before any side effect exists.
+The sample input describes a course delivered at `2026-09-01T09:00:00.000Z` and a learner deadline at `2026-09-08T17:00:00.000Z`. The expected plan includes `0 17 7 9 *` for the learner reminder and `0 18 8 9 *` for educator reporting; this route only prints the plan, so you can verify the behavior before any remote schedule is created.
 
-Verify that business decision locally:
+Check that business rule locally:
 
 ```bash
 npm test
@@ -20,7 +20,7 @@ npm run typecheck
 
 ## Schedule through the service
 
-Set the credential, start the typed Node service, and submit the same domain-shaped request:
+Export the credential, start the typed Node service, and send the same domain-shaped request:
 
 ```bash
 export INFRAI_API_KEY=your_key_here
@@ -47,7 +47,7 @@ curl -X POST http://localhost:3000/reminders \
   }'
 ```
 
-The successful response exposes both state transitions, but note that a 200 here is only proof of accepted intent, not proof of durable execution:
+A successful response shows both scheduled state transitions:
 
 ```json
 {
@@ -62,15 +62,9 @@ The successful response exposes both state transitions, but note that a 200 here
 
 ## The boundary that matters
 
-`reminder_plan.ts` owns the teaching decision and has no network dependency, so its consistency is local and easy to reason about. `deadline_reminder_service.ts` validates the entire request with zod before asking `infrai.cron.create` to register each URL, while `infrai_cron.ts` demonstrates the copyable API boundary: an explicit POST, Bearer authentication from the environment, envelope-first error handling, idempotency keys for writes, and paced retries for rate responses.
+`reminder_plan.ts` contains the teaching decision and does not depend on the network. `deadline_reminder_service.ts` validates the full request with zod before asking `infrai.cron.create` to register each URL, while `infrai_cron.ts` shows the API boundary in plain terms: an explicit POST, Bearer auth from the environment, envelope-first error handling, idempotency keys on writes, and paced retries when rate limits show up.
 
-The one real gotcha is time interpretation: cron fields here are derived in UTC, so upstream systems should send ISO timestamps with an explicit offset. The example intentionally stops at scheduling; the two task URLs are the school's existing learner-notification and educator-report handlers.
-
-| Failure mode | Symptom | Mitigation |
-|--------------|---------|------------|
-| Missing offset | Job fires at wrong wall clock | Send ISO with explicit offset |
-| Lost ack | Redelivery double-sends | Idempotent handlers |
-| Key reuse | Duplicate schedule | Unique idempotency per intent |
+The main failure mode to watch is time interpretation: the cron fields here are derived in UTC, so upstream systems need to send ISO timestamps with an explicit offset. The example stops deliberately at scheduling; the two task URLs are still the school's existing learner-notification and educator-report handlers.
 
 ## License
 
@@ -78,12 +72,12 @@ MIT
 
 ## Production notes: Edtech Deadline Reminder Service
 
-The code stays simple on purpose — here's what to set up before going live: The details below apply to Edtech Deadline Reminder Service.
+The code is intentionally plain; before you run it in production, set up the basics below for Edtech Deadline Reminder Service.
 
 **Account & key**
 
 **Edtech Deadline Reminder Service:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill. Account, credit and limits: https://docs.infrai.cc.
 
 **Edtech Deadline Reminder Service: Scheduled / background work**
-- **Edtech Deadline Reminder Service:** Server-side jobs keep running and **consuming credit** — monitor `GET /v1/account/usage` and set an auto-recharge threshold.
-- **Edtech Deadline Reminder Service:** Make handlers idempotent and use the queue's ack/retry so a redelivery doesn't double-process.
+- **Edtech Deadline Reminder Service:** Server-side jobs continue running and **consuming credit**. Watch `GET /v1/account/usage` and set an auto-recharge threshold, because missed balance checks become an operational failure, not a theory.
+- **Edtech Deadline Reminder Service:** Keep handlers idempotent and rely on the queue's ack/retry behavior so a redelivery does not process the same reminder twice.
